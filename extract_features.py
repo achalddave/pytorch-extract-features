@@ -1,6 +1,5 @@
 """Extract features from a list of images.
 
-
 Example usage:
     python extract_features.py \
         --image-list <(ls /path/to/images/*.jpg) \
@@ -8,12 +7,18 @@ Example usage:
         --output-features features.h5 \
         --batch-size 10 \
         --pretrained
+
+This will output an HDF5 file with two datasets: 'features' and 'image_names'.
+The 'image_names' dataset will contain a list of length (num_images, ) that
+contains the name of each image from the image list. The 'features' dataset
+contains a list of length (num_images, num_features) that contains the features
+for each image.
 """
 
 import argparse
 import logging
 import random
-from os.path import basename, splitext
+from os import path
 from tqdm import tqdm
 
 import h5py
@@ -88,6 +93,10 @@ class ListDataset(torch.utils.data.Dataset):
         return len(self.images_list)
 
 
+def image_path_to_name(image_path):
+    return np.string_(path.splitext(path.basename(image_path))[0])
+
+
 def extract_features_to_disk(image_paths,
                              model,
                              layer,
@@ -126,8 +135,8 @@ def extract_features_to_disk(image_paths,
         # current_features will be updated by feature_extraction_hook above.
         # Unfortunately there's no other general, straight-forward way to
         # extract features.
-        for j, path in enumerate(paths):
-            features[path] = current_features['features'][j]
+        for j, image_path in enumerate(paths):
+            features[image_path] = current_features['features'][j]
 
     logging.info('Outputting features')
     with h5py.File(output_hdf5, 'a') as f:
@@ -135,8 +144,8 @@ def extract_features_to_disk(image_paths,
         features_stacked = np.vstack([features[path] for path in paths])
         f.create_dataset('features', data=features_stacked)
         f.create_dataset(
-            'paths',
-            data=[np.string_(splitext(basename(path))[0]) for path in paths],
+            'image_names',
+            data=[image_path_to_name(path) for path in paths],
             dtype=h5py.special_dtype(vlen=str))
 
 
@@ -176,8 +185,7 @@ def main():
         '--batch-size',
         default=256,
         type=int,
-        metavar='N',
-        help='mini-batch size')
+        metavar='N')
     parser.add_argument('--seed', default=0, type=int, help='Random seed')
     parser.add_argument(
         '--pretrained', action='store_true', help='Use pre-trained model')
