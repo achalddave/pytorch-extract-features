@@ -18,19 +18,22 @@ for each image.
 import argparse
 import logging
 import random
+import sys
 from os import path
-from tqdm import tqdm
 
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
+from torch import nn
 from torchvision.datasets.folder import default_loader
+from tqdm import tqdm
 
 logging.getLogger().setLevel(logging.INFO)
 logging.basicConfig(format='%(asctime)s.%(msecs).03d: %(message)s',
@@ -42,36 +45,79 @@ model_names = sorted(
         models.__dict__[name]))
 
 
-def densenet_model(architecture, model, layer):
-    if layer == 'fc':
-        return model.features[-1]
-    else:
-        raise NotImplementedError
+class AlexNetPartial(nn.Module):
+    supported_layers = [
+        'conv1', 'conv2', 'conv3', 'conv4', 'conv5', 'fc6', 'relu6', 'fc7',
+        'fc8'
+    ]
+
+    def __init__(self, layer, **kwargs):
+        super(AlexNetPartial, self).__init__()
+        assert(layer in AlexNetPartial.supported_layers)
+        self.model = models.alexnet(**kwargs)
+        self.output_layer = layer
+
+        if 'conv' in self.output_layer:
+            # Map, e.g., 'conv2' to corresponding index into self.features
+            conv_map = {}
+            conv_index = 1
+            for i, layer in enumerate(self.model.features):
+                if isinstance(layer, nn.Conv2d):
+                    conv_map['conv%s' % conv_index] = i
+                    conv_index += 1
+            requested_index = conv_map[self.output_layer]
+            features = list(self.model.features.children())[:requested_index]
+            self.model.features = nn.Sequential(*features)
+        else:
+            classifier_map = {
+                'fc6': 1,
+                'relu6': 2,
+                'fc7': 4,
+                'relu7': 5,
+                'fc8': 6
+            }
+            requested_index = classifier_map[self.model.output_layer]
+            classifier = list(self.model.classifier.children())[:requested_index]
+            self.model.classifier = nn.Sequential(*classifier)
+
+    def forward(self, x):
+        x = self.model.features(x)
+        if 'conv' in self.output_layer:
+            return x
+        x = x.view(x.size(0), 256 * 6 * 6)
+        x = self.model.classifier(x)
+        return x
 
 
-get_layer = {
-    'alexnet': {
-        'conv1': lambda model: model._modules['features'][0],
-        'fc6': lambda model: model._modules['classifier'][1],
-        'relu6': lambda model: model._modules['classifier'][2],
-        'fc7': lambda model: model._modules['classifier'][4],
-        'fc8': lambda model: model._modules['classifier'][6]
-    },
-    # 'resnet18': {},
-    'densenet121': {
-        'fc': lambda model: densenet_model('densenet121', model, 'fc')
-    },
-    'densenet161': {
-        'fc': lambda model: densenet_model('densenet161', model, 'fc')
-    },
-    'densenet169': {
-        'fc': lambda model: densenet_model('densenet169', model, 'fc')
-    },
-    'densenet201': {
-        'fc': lambda model: densenet_model('densenet201', model, 'fc')
-    }
+class DenseNetPartial(nn.Module):
+    supported_layers = ['avg_last', 'final']
+
+    def __init__(self, arch, layer, **kwargs):
+        super(DenseNetPartial, self).__init__()
+        assert arch.startswith('densenet')
+        self.model = models.__dict__[arch](**kwargs)
+        self.output_layer = layer
+
+    def forward(self, x):
+        features = self.model.features(x)
+        out = F.relu(features, inplace=True)
+        out = F.avg_pool2d(
+            out, kernel_size=7, stride=1).view(features.size(0), -1)
+        if self.output_layer == 'avg_last':
+            return out
+        elif self.output_layer == 'final':
+            out = self.model.classifier(out)
+            return out
+        else:
+            raise NotImplementedError
+
+partial_models = {
+    'alexnet': AlexNetPartial,
+    'densenet121': DenseNetPartial,
+    'densenet161': DenseNetPartial,
+    'densenet169': DenseNetPartial,
+    'densenet201': DenseNetPartial
 }
-
 
 class ListDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -94,12 +140,15 @@ class ListDataset(torch.utils.data.Dataset):
 
 
 def image_path_to_name(image_path):
-    return np.string_(path.splitext(path.basename(image_path))[0])
+    # return np.string_(path.splitext(path.basename(image_path))[0])
+    parent, image_name = path.split(image_path)
+    image_name = path.splitext(image_name)[0]
+    parent = path.split(parent)[1]
+    return path.join(parent, image_name)
 
 
 def extract_features_to_disk(image_paths,
                              model,
-                             layer,
                              batch_size,
                              workers,
                              output_hdf5):
@@ -108,7 +157,7 @@ def extract_features_to_disk(image_paths,
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     dataset = ListDataset(image_paths,
                           transforms.Compose([
-                              transforms.Scale(256),
+                              transforms.Resize(256),
                               transforms.CenterCrop(224),
                               transforms.ToTensor(),
                               normalize,
@@ -120,33 +169,35 @@ def extract_features_to_disk(image_paths,
         num_workers=workers,
         pin_memory=True)
 
-    current_features = {'features': None}  # Hack around nonlocal for python 2
-
-    def feature_extraction_hook(model, input_data, output):
-        del model, input_data
-        current_features['features'] = output.data.cpu().numpy()
-
-    layer.register_forward_hook(feature_extraction_hook)
-
     features = {}
     for i, (input_data, paths) in enumerate(tqdm(loader)):
         input_var = torch.autograd.Variable(input_data, volatile=True).cuda()
-        model(input_var)
-        # current_features will be updated by feature_extraction_hook above.
-        # Unfortunately there's no other general, straight-forward way to
-        # extract features.
+        current_features = model(input_var).data.cpu().numpy()
         for j, image_path in enumerate(paths):
-            features[image_path] = current_features['features'][j]
+            features[image_path] = current_features[j]
 
+    feature_shape = features[list(features.keys())[0]].shape
+    print('Feature shape: %s' % (feature_shape, ))
     logging.info('Outputting features')
+
+    if sys.version_info >= (3, 0):
+        string_type = h5py.special_dtype(vlen=str)
+    else:
+        string_type = h5py.special_dtype(vlen=unicode)  # noqa
+    paths = features.keys()
+    logging.info('Stacking features')
+    features_stacked = np.vstack([features[path] for path in paths])
+    logging.info('Output feature size: %s' % (features_stacked.shape, ))
     with h5py.File(output_hdf5, 'a') as f:
-        paths = features.keys()
-        features_stacked = np.vstack([features[path] for path in paths])
         f.create_dataset('features', data=features_stacked)
         f.create_dataset(
             'image_names',
-            data=[image_path_to_name(path) for path in paths],
-            dtype=h5py.special_dtype(vlen=str))
+            (len(paths), ),
+            dtype=string_type)
+        # For some reason, assigning the list directly causes an error, so we
+        # assign it in a loop.
+        for i, image_path in enumerate(paths):
+            f['image_names'][i] = image_path_to_name(image_path)
 
 
 def main():
@@ -160,14 +211,14 @@ def main():
         '--arch-layer',
         default='alexnet-fc7',
         choices=[
-            '{}-{}'.format(model, layer)
-            for model, layers in get_layer.items() for layer in layers
+            '{}-{}'.format(name, layer)
+            for name, partial in partial_models.items() for layer in partial.supported_layers
         ],
         help='Architecture + layer to extract features from. Choices: ' +
         ', '.join([
             '{model}-{{{layers}}}'.format(
-                model=model, layers=','.join(layers.keys()))
-            for model, layers in get_layer.items()
+                model=model, layers=','.join(partial.supported_layers))
+            for model, partial in partial_models.items()
         ]))
     parser.add_argument(
         '--output-features',
@@ -192,11 +243,17 @@ def main():
 
     args = parser.parse_args()
 
+    assert not path.exists(args.output_features)
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     architecture, layer = args.arch_layer.split('-')
-    model = models.__dict__[architecture](pretrained=args.pretrained)
+    if architecture.startswith('densenet'):
+        model = partial_models[architecture](
+            architecture, layer, pretrained=args.pretrained)
+    else:
+        model = partial_models[architecture](layer, pretrained=args.pretrained)
 
     # Multi-GPU currently not supported.
     # if (architecture.startswith('alexnet')
@@ -210,12 +267,10 @@ def main():
     model.cuda()
     model.eval()
 
-    layer = get_layer[architecture][layer](model)
-
     with open(args.image_list, 'r') as f:
         images = [line.strip() for line in f]
 
-    extract_features_to_disk(images, model, layer, args.batch_size,
+    extract_features_to_disk(images, model, args.batch_size,
                              args.workers, args.output_features)
 
 
