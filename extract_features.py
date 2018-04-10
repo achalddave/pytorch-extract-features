@@ -25,10 +25,6 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.nn.parallel
-import torch.optim
-import torch.utils.data
-import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torch import nn
