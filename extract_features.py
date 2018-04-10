@@ -77,7 +77,8 @@ class AlexNetPartial(nn.Module):
                 'fc8': 6
             }
             requested_index = classifier_map[self.model.output_layer]
-            classifier = list(self.model.classifier.children())[:requested_index]
+            classifier = list(
+                self.model.classifier.children())[:requested_index]
             self.model.classifier = nn.Sequential(*classifier)
 
     def forward(self, x):
@@ -150,6 +151,7 @@ partial_models = {
     'vgg19_bn': VggPartial,
     'vgg19': VggPartial,
 }
+
 
 class ListDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -244,7 +246,8 @@ def main():
         default='alexnet-fc7',
         choices=[
             '{}-{}'.format(name, layer)
-            for name, partial in partial_models.items() for layer in partial.supported_layers
+            for name, partial in partial_models.items()
+            for layer in partial.supported_layers
         ],
         help='Architecture + layer to extract features from. Choices: ' +
         ', '.join([
