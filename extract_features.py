@@ -287,14 +287,13 @@ def main():
     else:
         model = partial_models[architecture](layer, pretrained=args.pretrained)
 
-    # Multi-GPU currently not supported.
-    # if (architecture.startswith('alexnet')
-    #         or architecture.startswith('vgg')):
-    #     # Copied from
-    #     # https://github.com/pytorch/examples/blob/d5678bc8ac0cdd79dbd5e44d4130271018bcec4e/imagenet/main.py
-    #     model.features = torch.nn.DataParallel(model.features)
-    # else:
-    #     model = torch.nn.DataParallel(model)
+    if (architecture.startswith('alexnet')
+            or architecture.startswith('vgg')):
+        # Copied from
+        # https://github.com/pytorch/examples/blob/d5678bc8ac0cdd79dbd5e44d4130271018bcec4e/imagenet/main.py
+        model.model.features = torch.nn.DataParallel(model.model.features)
+    else:
+        model = torch.nn.DataParallel(model)
 
     model.cuda()
     model.eval()
