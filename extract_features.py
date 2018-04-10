@@ -89,6 +89,29 @@ class AlexNetPartial(nn.Module):
         return x
 
 
+class VggPartial(nn.Module):
+    supported_layers = ['fc1', 'relu1', 'fc2', 'relu2', 'fc3']
+
+    def __init__(self, arch, layer, **kwargs):
+        super(VggPartial, self).__init__()
+        assert layer in VggPartial.supported_layers
+        assert arch.startswith('vgg')
+        self.model = models.__dict__[arch](**kwargs)
+        self.output_layer = layer
+        keep_upto = {
+            'fc1': 0,
+            'relu1': 1,
+            'fc2': 3,
+            'relu2': 4,
+            'fc3': 6}[layer]
+        classifier = list(
+            self.model.classifier.children())[:keep_upto + 1]
+        self.model.classifier = nn.Sequential(*classifier)
+
+    def forward(self, x):
+        return self.model.forward(x)
+
+
 class DenseNetPartial(nn.Module):
     supported_layers = ['avg_last', 'final']
 
@@ -111,12 +134,21 @@ class DenseNetPartial(nn.Module):
         else:
             raise NotImplementedError
 
+
 partial_models = {
     'alexnet': AlexNetPartial,
     'densenet121': DenseNetPartial,
     'densenet161': DenseNetPartial,
     'densenet169': DenseNetPartial,
-    'densenet201': DenseNetPartial
+    'densenet201': DenseNetPartial,
+    'vgg11': VggPartial,
+    'vgg11_bn': VggPartial,
+    'vgg13': VggPartial,
+    'vgg13_bn': VggPartial,
+    'vgg16': VggPartial,
+    'vgg16_bn': VggPartial,
+    'vgg19_bn': VggPartial,
+    'vgg19': VggPartial,
 }
 
 class ListDataset(torch.utils.data.Dataset):
@@ -249,7 +281,7 @@ def main():
     torch.manual_seed(args.seed)
 
     architecture, layer = args.arch_layer.split('-')
-    if architecture.startswith('densenet'):
+    if architecture.startswith('densenet') or architecture.startswith('vgg'):
         model = partial_models[architecture](
             architecture, layer, pretrained=args.pretrained)
     else:
