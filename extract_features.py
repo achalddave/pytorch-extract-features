@@ -72,7 +72,7 @@ class AlexNetPartial(nn.Module):
                 'relu7': 5,
                 'fc8': 6
             }
-            requested_index = classifier_map[self.model.output_layer]
+            requested_index = classifier_map[self.output_layer]
             classifier = list(
                 self.model.classifier.children())[:requested_index]
             self.model.classifier = nn.Sequential(*classifier)
