@@ -230,6 +230,21 @@ def extract_features_to_disk(image_paths,
             f['image_names'][i] = image_path_to_name(image_path)
 
 
+def parse_bool(arg):
+    """Parse string to boolean.
+
+    Using type=bool in argparse does not do the right thing. E.g.
+    '--bool_flag False' will parse as True. See
+    <https://stackoverflow.com/q/15008758/1291812>
+    """
+    if arg == 'True':
+        return True
+    elif arg == 'False':
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Expected 'True' or 'False'.")
+
+
 def main():
     # Use first line of file docstring as description if it exists.
     parser = argparse.ArgumentParser(
@@ -270,7 +285,10 @@ def main():
         metavar='N')
     parser.add_argument('--seed', default=0, type=int, help='Random seed')
     parser.add_argument(
-        '--pretrained', action='store_true', help='Use pre-trained model')
+        '--pretrained',
+        type=parse_bool,
+        default=True,
+        help='Whether to use pre-trained model')
 
     args = parser.parse_args()
 
