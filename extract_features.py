@@ -6,7 +6,7 @@ Example usage:
         --arch-layer alexnet-fc7 \
         --output-features features.h5 \
         --batch-size 10 \
-        --pretrained
+        --pretrained True
 
 This will output an HDF5 file with two datasets: 'features' and 'image_names'.
 The 'image_names' dataset will contain a list of length (num_images, ) that
@@ -37,16 +37,38 @@ model_names = sorted(
         models.__dict__[name]))
 
 
+def load_model(model, model_file):
+    checkpoint = torch.load(model_file)
+    # Support for checkpoints saved by scripts based off of
+    #   https://github.com/pytorch/examples/blob/master/imagenet/main.py
+    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        checkpoint = checkpoint['state_dict']
+    logging.info('Loading model from %s', model_file)
+    model.load_state_dict(checkpoint, strict=False)
+
+    missing_keys = set(model.state_dict().keys()) - set(checkpoint.keys())
+    extra_keys = set(checkpoint.keys()) - set(model.state_dict().keys())
+    if missing_keys:
+        logging.info('Missing keys in --model-file: %s.', missing_keys)
+    if extra_keys:
+        logging.info('Extra keys ignored in --model-file: %s.', extra_keys)
+
+
 class AlexNetPartial(nn.Module):
     supported_layers = [
         'conv1', 'conv2', 'conv3', 'conv4', 'conv5', 'fc6', 'relu6', 'fc7',
         'fc8'
     ]
 
-    def __init__(self, layer, **kwargs):
+    def __init__(self,
+                 layer,
+                 model_file=None,
+                 data_parallel=False,
+                 **kwargs):
         super(AlexNetPartial, self).__init__()
         assert(layer in AlexNetPartial.supported_layers)
         self.model = models.alexnet(**kwargs)
+
         self.output_layer = layer
 
         if 'conv' in self.output_layer:
@@ -72,6 +94,10 @@ class AlexNetPartial(nn.Module):
             classifier = list(
                 self.model.classifier.children())[:requested_index]
             self.model.classifier = nn.Sequential(*classifier)
+        if data_parallel:
+            self.model.features = torch.nn.DataParallel(self.model.features)
+        if model_file is not None:
+            load_model(self.model, model_file)
 
     def forward(self, x):
         x = self.model.features(x)
@@ -85,11 +111,16 @@ class AlexNetPartial(nn.Module):
 class VggPartial(nn.Module):
     supported_layers = ['fc1', 'relu1', 'fc2', 'relu2', 'fc3']
 
-    def __init__(self, arch, layer, **kwargs):
+    def __init__(self,
+                 architecture,
+                 layer,
+                 model_file=None,
+                 data_parallel=False,
+                 **kwargs):
         super(VggPartial, self).__init__()
         assert layer in VggPartial.supported_layers
-        assert arch.startswith('vgg')
-        self.model = models.__dict__[arch](**kwargs)
+        assert architecture.startswith('vgg')
+        self.model = models.__dict__[architecture](**kwargs)
         self.output_layer = layer
         keep_upto = {
             'fc1': 0,
@@ -100,6 +131,10 @@ class VggPartial(nn.Module):
         classifier = list(
             self.model.classifier.children())[:keep_upto + 1]
         self.model.classifier = nn.Sequential(*classifier)
+        if data_parallel:
+            self.model.features = torch.nn.DataParallel(self.model.features)
+        if model_file is not None:
+            load_model(self.model, model_file)
 
     def forward(self, x):
         return self.model.forward(x)
@@ -108,10 +143,19 @@ class VggPartial(nn.Module):
 class DenseNetPartial(nn.Module):
     supported_layers = ['avg_last', 'final']
 
-    def __init__(self, arch, layer, **kwargs):
+    def __init__(self,
+                 architecture,
+                 layer,
+                 model_file=None,
+                 data_parallel=False,
+                 **kwargs):
         super(DenseNetPartial, self).__init__()
-        assert arch.startswith('densenet')
-        self.model = models.__dict__[arch](**kwargs)
+        assert architecture.startswith('densenet')
+        self.model = models.__dict__[architecture](**kwargs)
+        if data_parallel:
+            self.model = torch.nn.DataParallel(self.model)
+        if model_file is not None:
+            load_model(self.model, model_file)
         self.output_layer = layer
 
     def forward(self, x):
@@ -307,12 +351,25 @@ def main():
         default=True,
         help='Whether to use pre-trained model')
     parser.add_argument(
+        '--data-parallel',
+        type=parse_bool,
+        default=True,
+        help='Whether to use torch.nn.DataParallel')
+
+    parser.add_argument(
+        '--model-file',
+        help='Load model weights from a file.')
+
+    parser.add_argument(
         '--output_log',
         help='Output file to log to. Default: --output_features + ".log"')
 
     args = parser.parse_args()
 
     assert not path.exists(args.output_features)
+    if args.model_file is not None:
+        assert not args.pretrained, (
+            '--pretrained cannot be specified if --model_file is specified.')
     if args.output_log is None:
         args.output_log = args.output_features + '.log'
     _set_logging(args.output_log)
@@ -322,19 +379,16 @@ def main():
     torch.manual_seed(args.seed)
 
     architecture, layer = args.arch_layer.split('-')
-    if architecture.startswith('densenet') or architecture.startswith('vgg'):
-        model = partial_models[architecture](
-            architecture, layer, pretrained=args.pretrained)
-    else:
-        model = partial_models[architecture](layer, pretrained=args.pretrained)
 
-    if (architecture.startswith('alexnet')
-            or architecture.startswith('vgg')):
-        # Copied from
-        # https://github.com/pytorch/examples/blob/d5678bc8ac0cdd79dbd5e44d4130271018bcec4e/imagenet/main.py
-        model.model.features = torch.nn.DataParallel(model.model.features)
-    else:
-        model = torch.nn.DataParallel(model)
+    construction_kwargs = {
+        'layer': layer,
+        'pretrained': args.pretrained,
+        'model_file': args.model_file,
+        'data_parallel': args.data_parallel,
+    }
+    if architecture.startswith('densenet') or architecture.startswith('vgg'):
+        construction_kwargs['architecture'] = architecture
+    model = partial_models[architecture](**construction_kwargs)
 
     model.cuda()
     model.eval()
