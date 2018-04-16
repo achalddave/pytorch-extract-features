@@ -31,10 +31,6 @@ from torch import nn
 from torchvision.datasets.folder import default_loader
 from tqdm import tqdm
 
-logging.getLogger().setLevel(logging.INFO)
-logging.basicConfig(format='%(asctime)s.%(msecs).03d: %(message)s',
-                    datefmt='%H:%M:%S')
-
 model_names = sorted(
     name for name in models.__dict__
     if name.islower() and not name.startswith("__") and callable(
@@ -207,7 +203,7 @@ def extract_features_to_disk(image_paths,
             features[image_path] = current_features[j]
 
     feature_shape = features[list(features.keys())[0]].shape
-    print('Feature shape: %s' % (feature_shape, ))
+    logging.info('Feature shape: %s' % (feature_shape, ))
     logging.info('Outputting features')
 
     if sys.version_info >= (3, 0):
@@ -243,6 +239,27 @@ def parse_bool(arg):
         return False
     else:
         raise argparse.ArgumentTypeError("Expected 'True' or 'False'.")
+
+
+def _set_logging(logging_filepath):
+    """Setup logger to log to file and stdout."""
+    log_format = '%(asctime)s.%(msecs).03d: %(message)s'
+    date_format = '%H:%M:%S'
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(logging_filepath)
+    file_handler.setFormatter(
+        logging.Formatter(log_format, datefmt=date_format))
+    root_logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter(log_format, datefmt=date_format))
+    root_logger.addHandler(console_handler)
+
+    logging.info('Writing log file to %s', logging_filepath)
 
 
 def main():
@@ -289,10 +306,17 @@ def main():
         type=parse_bool,
         default=True,
         help='Whether to use pre-trained model')
+    parser.add_argument(
+        '--output_log',
+        help='Output file to log to. Default: --output_features + ".log"')
 
     args = parser.parse_args()
 
     assert not path.exists(args.output_features)
+    if args.output_log is None:
+        args.output_log = args.output_features + '.log'
+    _set_logging(args.output_log)
+    logging.info('Args: %s', args)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
