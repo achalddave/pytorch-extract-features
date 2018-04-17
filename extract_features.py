@@ -80,7 +80,7 @@ class AlexNetPartial(nn.Module):
                     conv_map['conv%s' % conv_index] = i
                     conv_index += 1
             requested_index = conv_map[self.output_layer]
-            features = list(self.model.features.children())[:requested_index]
+            features = list(self.model.features.children())[:requested_index+1]
             self.model.features = nn.Sequential(*features)
         else:
             classifier_map = {
@@ -92,7 +92,7 @@ class AlexNetPartial(nn.Module):
             }
             requested_index = classifier_map[self.output_layer]
             classifier = list(
-                self.model.classifier.children())[:requested_index]
+                self.model.classifier.children())[:requested_index+1]
             self.model.classifier = nn.Sequential(*classifier)
         if data_parallel:
             self.model.features = torch.nn.DataParallel(self.model.features)
